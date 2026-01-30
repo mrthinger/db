@@ -1,0 +1,16 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 39258627506a63c74425eb5c4e69fdec8af0f599..9a2052759d8466068fbb9e45552e5ac013e48770 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -1635,9 +1635,8 @@ requestShapeLongPoll_fn = async function(opts) {
+   __privateSet(this, _connected, true);
+   await __privateMethod(this, _ShapeStream_instances, onInitialResponse_fn).call(this, response);
+   const schema = __privateGet(this, _schema);
+-  const res = await response.text();
+-  const messages = res || `[]`;
+-  const batch = __privateGet(this, _messageParser).parse(messages, schema);
++  const messages = await response.json();
++  const batch = __privateGet(this, _messageParser).parseSnapshotData(messages, schema);
+   await __privateMethod(this, _ShapeStream_instances, onMessages_fn).call(this, batch);
+ };
+ requestShapeSSE_fn = async function(opts) {

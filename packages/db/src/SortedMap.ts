@@ -1,108 +1,68 @@
 import { compareKeys } from '@tanstack/db-ivm'
 
 /**
- * A Map implementation that keeps its entries sorted based on a comparator function
+ * A Map implementation that optionally keeps its entries sorted based on a comparator function.
+ *
+ * When a comparator is provided, entries are lazily sorted on iteration (not on mutation).
+ * When no comparator is provided, entries use Map's insertion order (no sorting overhead).
+ *
  * @template TKey - The type of keys in the map (must be string | number)
  * @template TValue - The type of values in the map
  */
 export class SortedMap<TKey extends string | number, TValue> {
   private map: Map<TKey, TValue>
-  private sortedKeys: Array<TKey>
+  private sortedKeys: Array<TKey> | null = null
   private comparator: ((a: TValue, b: TValue) => number) | undefined
+  private isDirty = false
 
   /**
    * Creates a new SortedMap instance
    *
    * @param comparator - Optional function to compare values for sorting.
-   *                     If not provided, entries are sorted by key only.
+   *                     If not provided, entries use Map's insertion order (no sorting).
    */
   constructor(comparator?: (a: TValue, b: TValue) => number) {
     this.map = new Map<TKey, TValue>()
-    this.sortedKeys = []
     this.comparator = comparator
   }
 
   /**
-   * Finds the index where a key-value pair should be inserted to maintain sort order.
-   * Uses binary search to find the correct position based on the value (if comparator provided),
-   * with key-based tie-breaking for deterministic ordering when values compare as equal.
-   * If no comparator is provided, sorts by key only.
-   * Runs in O(log n) time.
-   *
-   * @param key - The key to find position for (used as tie-breaker or primary sort when no comparator)
-   * @param value - The value to compare against (only used if comparator is provided)
-   * @returns The index where the key should be inserted
+   * Ensures sortedKeys is up to date. Only needed when comparator is provided.
+   * Uses lazy sorting - only rebuilds when dirty and iteration is requested.
    */
-  private indexOf(key: TKey, value: TValue): number {
-    let left = 0
-    let right = this.sortedKeys.length
+   private ensureSorted(): void {
+     if (!this.comparator) return // No sorting needed
+     if (!this.isDirty && this.sortedKeys !== null) return
 
-    // Fast path: no comparator means sort by key only
-    if (!this.comparator) {
-      while (left < right) {
-        const mid = Math.floor((left + right) / 2)
-        const midKey = this.sortedKeys[mid]!
-        const keyComparison = compareKeys(key, midKey)
-        if (keyComparison < 0) {
-          right = mid
-        } else if (keyComparison > 0) {
-          left = mid + 1
-        } else {
-          return mid
-        }
-      }
-      return left
-    }
+     // Fast path for empty map
+     if (this.map.size === 0) {
+       this.sortedKeys = []
+       this.isDirty = false
+       return
+     }
 
-    // With comparator: sort by value first, then key as tie-breaker
-    while (left < right) {
-      const mid = Math.floor((left + right) / 2)
-      const midKey = this.sortedKeys[mid]!
-      const midValue = this.map.get(midKey)!
-      const valueComparison = this.comparator(value, midValue)
-
-      if (valueComparison < 0) {
-        right = mid
-      } else if (valueComparison > 0) {
-        left = mid + 1
-      } else {
-        // Values are equal, use key as tie-breaker for deterministic ordering
-        const keyComparison = compareKeys(key, midKey)
-        if (keyComparison < 0) {
-          right = mid
-        } else if (keyComparison > 0) {
-          left = mid + 1
-        } else {
-          // Same key (shouldn't happen during insert, but handle for lookups)
-          return mid
-        }
-      }
-    }
-
-    return left
-  }
+     const entries = Array.from(this.map.entries())
+     entries.sort((a, b) => {
+       const valueComparison = this.comparator!(a[1], b[1])
+       if (valueComparison !== 0) return valueComparison
+       return compareKeys(a[0], b[0])
+     })
+     this.sortedKeys = entries.map(([key]) => key)
+     this.isDirty = false
+   }
 
   /**
-   * Sets a key-value pair in the map and maintains sort order
+   * Sets a key-value pair in the map
    *
    * @param key - The key to set
    * @param value - The value to associate with the key
    * @returns This SortedMap instance for chaining
    */
   set(key: TKey, value: TValue): this {
-    if (this.map.has(key)) {
-      // Need to remove the old key from the sorted keys array
-      const oldValue = this.map.get(key)!
-      const oldIndex = this.indexOf(key, oldValue)
-      this.sortedKeys.splice(oldIndex, 1)
-    }
-
-    // Insert the new key at the correct position
-    const index = this.indexOf(key, value)
-    this.sortedKeys.splice(index, 0, key)
-
     this.map.set(key, value)
-
+    if (this.comparator) {
+      this.isDirty = true // Only track dirty if we need sorting
+    }
     return this
   }
 
@@ -123,14 +83,11 @@ export class SortedMap<TKey extends string | number, TValue> {
    * @returns True if the key was found and removed, false otherwise
    */
   delete(key: TKey): boolean {
-    if (this.map.has(key)) {
-      const oldValue = this.map.get(key)
-      const index = this.indexOf(key, oldValue!)
-      this.sortedKeys.splice(index, 1)
-      return this.map.delete(key)
+    const result = this.map.delete(key)
+    if (result && this.comparator) {
+      this.isDirty = true
     }
-
-    return false
+    return result
   }
 
   /**
@@ -148,7 +105,8 @@ export class SortedMap<TKey extends string | number, TValue> {
    */
   clear(): void {
     this.map.clear()
-    this.sortedKeys = []
+    this.sortedKeys = null
+    this.isDirty = false
   }
 
   /**
@@ -159,18 +117,25 @@ export class SortedMap<TKey extends string | number, TValue> {
   }
 
   /**
-   * Default iterator that returns entries in sorted order
+   * Default iterator that returns entries in order.
+   * If comparator is provided, entries are sorted; otherwise insertion order.
    *
    * @returns An iterator for the map's entries
    */
   *[Symbol.iterator](): IterableIterator<[TKey, TValue]> {
-    for (const key of this.sortedKeys) {
-      yield [key, this.map.get(key)!] as [TKey, TValue]
+    if (!this.comparator) {
+      // No sorting - use map's insertion order
+      yield* this.map.entries()
+    } else {
+      this.ensureSorted()
+      for (const key of this.sortedKeys!) {
+        yield [key, this.map.get(key)!] as [TKey, TValue]
+      }
     }
   }
 
   /**
-   * Returns an iterator for the map's entries in sorted order
+   * Returns an iterator for the map's entries in order
    *
    * @returns An iterator for the map's entries
    */
@@ -179,37 +144,53 @@ export class SortedMap<TKey extends string | number, TValue> {
   }
 
   /**
-   * Returns an iterator for the map's keys in sorted order
+   * Returns an iterator for the map's keys in order
    *
    * @returns An iterator for the map's keys
    */
-  keys(): IterableIterator<TKey> {
-    return this.sortedKeys[Symbol.iterator]()
+  *keys(): IterableIterator<TKey> {
+    if (!this.comparator) {
+      // No sorting - use map's insertion order
+      yield* this.map.keys()
+    } else {
+      this.ensureSorted()
+      yield* this.sortedKeys!
+    }
   }
 
   /**
-   * Returns an iterator for the map's values in sorted order
+   * Returns an iterator for the map's values in order
    *
    * @returns An iterator for the map's values
    */
-  values(): IterableIterator<TValue> {
-    return function* (this: SortedMap<TKey, TValue>) {
-      for (const key of this.sortedKeys) {
+  *values(): IterableIterator<TValue> {
+    if (!this.comparator) {
+      // No sorting - use map's insertion order
+      yield* this.map.values()
+    } else {
+      this.ensureSorted()
+      for (const key of this.sortedKeys!) {
         yield this.map.get(key)!
       }
-    }.call(this)
+    }
   }
 
   /**
-   * Executes a callback function for each key-value pair in the map in sorted order
+   * Executes a callback function for each key-value pair in the map in order
    *
    * @param callbackfn - Function to execute for each entry
    */
   forEach(
     callbackfn: (value: TValue, key: TKey, map: Map<TKey, TValue>) => void,
   ): void {
-    for (const key of this.sortedKeys) {
-      callbackfn(this.map.get(key)!, key, this.map)
+    if (!this.comparator) {
+      // No sorting - use map's insertion order
+      this.map.forEach(callbackfn)
+    } else {
+      this.ensureSorted()
+      for (const key of this.sortedKeys!) {
+        callbackfn(this.map.get(key)!, key, this.map)
+      }
     }
   }
 }

@@ -902,7 +902,7 @@ function createElectricSync<T extends Row<unknown>>(
     collectionId,
     testHooks,
   } = options
-  const MAX_BATCH_MESSAGES = 1000 // Safety limit for message buffer
+  const MAX_BATCH_MESSAGES = 10000 // Safety limit for message buffer (increased for large syncs)
 
   // Store for the relation schema information
   const relationSchema = new Store<string | undefined>(undefined)
@@ -1324,17 +1324,18 @@ function createElectricSync<T extends Row<unknown>>(
         // Reset batchCommitted since we're starting a new batch
         batchCommitted.setState(() => false)
 
+        // Collect messages for batch buffer (for awaitMatch race condition handling)
+        // Only buffer if there are pending matches to avoid unnecessary work during bulk sync
+        const hasPendingMatches = pendingMatches.state.size > 0
+        const messagesToBuffer: Array<Message<T>> = []
+
         for (const message of messages) {
-          // Add message to current batch buffer (for race condition handling)
-          if (isChangeMessage(message) || isMoveOutMessage(message)) {
-            currentBatchMessages.setState((currentBuffer) => {
-              const newBuffer = [...currentBuffer, message]
-              // Limit buffer size for safety
-              if (newBuffer.length > MAX_BATCH_MESSAGES) {
-                newBuffer.splice(0, newBuffer.length - MAX_BATCH_MESSAGES)
-              }
-              return newBuffer
-            })
+          // Add message to buffer collection (only if there are pending matches)
+          if (
+            hasPendingMatches &&
+            (isChangeMessage(message) || isMoveOutMessage(message))
+          ) {
+            messagesToBuffer.push(message)
           }
 
           // Check for txids in the message and add them to our store
@@ -1451,6 +1452,18 @@ function createElectricSync<T extends Row<unknown>>(
             hasReceivedUpToDate = false // Reset for progressive mode (isBufferingInitialSync will reflect this)
             bufferedMessages.length = 0 // Clear buffered messages
           }
+        }
+
+        // Batch update the message buffer (single setState call instead of one per message)
+        if (messagesToBuffer.length > 0) {
+          currentBatchMessages.setState((currentBuffer) => {
+            const combined = [...currentBuffer, ...messagesToBuffer]
+            // Limit buffer size for safety - keep most recent messages
+            if (combined.length > MAX_BATCH_MESSAGES) {
+              return combined.slice(combined.length - MAX_BATCH_MESSAGES)
+            }
+            return combined
+          })
         }
 
         if (commitPoint !== null) {
