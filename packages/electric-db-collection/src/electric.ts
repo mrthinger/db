@@ -1204,6 +1204,7 @@ function createElectricSync<T extends Row<unknown>>(
 
       const stream = new ShapeStream({
         ...shapeOptions,
+        subsetMethod: `GET`,
         // In on-demand mode, we only want to sync changes, so we set the log to `changes_only`
         log: syncMode === `on-demand` ? `changes_only` : undefined,
         // In on-demand mode, we only need the changes from the point of time the collection was created
